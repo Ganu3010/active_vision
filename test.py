@@ -12,7 +12,7 @@ for file in os.listdir("sample_images/"):
             if result.probs is not None and len(result.probs) > 0:
                 # print(f"Predicted class for {file}: {result.probs}")
                 outputs[file] = result.probs
-            # result.show()
+            result.save(f"outputs/{file}")
 
-with open("outputs.pkl", "wb") as f:
+with open("outputs/outputs.pkl", "wb") as f:
     pickle.dump(outputs , f)
