@@ -1,32 +1,18 @@
 from ultralytics import YOLO
 import os
-import torch
-
-# Load the model
-model = YOLO("yolov8m.pt")
-
-all_distributions = {}
-
+import pickle
+model = YOLO("yolov8n-cls.pt")
+outputs = {}
 for file in os.listdir("sample_images/"):
     if file.endswith((".jpg", ".png")):
-        path = f"sample_images/{file}"
-        results = model(path)
+        results = model(f"sample_images/{file}")
         
         for result in results:
-            # Check if classification probabilities exist
-            if result.probs is not None:
-                # result.probs.data contains the tensor of probabilities for all classes
-                # .tolist() makes it easy to save to JSON or a dictionary
-                probabilities = result.probs.data.tolist()
-                all_distributions[file] = probabilities
-                
-                # If you just want the top 5 classes and their scores:
-                # print(result.probs.top5conf) 
-            
+            # Check if any boxes were actually detected
+            if result.probs is not None and len(result.probs) > 0:
+                # print(f"Predicted class for {file}: {result.probs}")
+                outputs[file] = result.probs
             # result.show()
 
-print(all_distributions)
-# Example: Save to a file for later analysis
-# import json
-# with open('distributions.json', 'w') as f:
-#     json.dump(all_distributions, f)
+with open("outputs.pkl", "wb") as f:
+    pickle.dump(outputs , f)
