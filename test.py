@@ -1,18 +1,17 @@
-from ultralytics import YOLO
-import os
-import pickle
-model = YOLO("yolov8n-cls.pt")
-outputs = {}
-for file in os.listdir("sample_images/"):
-    if file.endswith((".jpg", ".png")):
-        results = model(f"sample_images/{file}")
-        
-        for result in results:
-            # Check if any boxes were actually detected
-            if result.probs is not None and len(result.probs) > 0:
-                # print(f"Predicted class for {file}: {result.probs}")
-                outputs[file] = result.probs
-            result.save(f"outputs/{file}")
+import shapenet_gym.env
+import cv2 as cv
 
-with open("outputs/outputs.pkl", "wb") as f:
-    pickle.dump(outputs , f)
+env = shapenet_gym.env.ShapeNetViewEnv(
+    dataset_root="data\ShapeNetCore",
+    max_steps=20,
+    image_size=(224, 224),
+    theta_step_deg=15.0,
+    phi_step_deg=15.0,
+    offscreen=False
+)
+
+obs, info = env.reset()
+print(info['category'])
+print(obs.shape)
+cv.imshow('Sample', obs)
+cv.waitKey(0)
