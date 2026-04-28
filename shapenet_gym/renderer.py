@@ -55,9 +55,15 @@ class MeshRenderer:
         self._mesh_node = None
         self._camera_node = None
 
-        # Choose platform before importing pyrender
-        if offscreen and "PYOPENGL_PLATFORM" not in os.environ:
-            # Try EGL first (NVIDIA servers), fall back to OSMesa (CPU)
+        # Choose platform before importing pyrender.
+        # On Linux headless we need osmesa/egl; on macOS PyOpenGL auto-selects
+        # the native CGL backend which works offscreen via pyglet.
+        import sys
+        if (
+            offscreen
+            and "PYOPENGL_PLATFORM" not in os.environ
+            and sys.platform != "darwin"
+        ):
             os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
         self._init_scene()
@@ -135,6 +141,20 @@ class MeshRenderer:
                 mesh=mesh,
                 vertex_colors=np.tile([180, 180, 200, 255], (len(mesh.vertices), 1)),
             )
+
+        # Some ShapeNet meshes ship absurdly large textures (e.g. 32768×4096)
+        # that exceed GL_MAX_TEXTURE_SIZE. Downscale on the fly.
+        _MAX_TEX = 2048
+        material = getattr(mesh.visual, "material", None)
+        if material is not None:
+            for attr in ("image", "baseColorTexture"):
+                img = getattr(material, attr, None)
+                if img is not None and hasattr(img, "size"):
+                    w, h = img.size
+                    if max(w, h) > _MAX_TEX:
+                        scale = _MAX_TEX / max(w, h)
+                        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                        setattr(material, attr, img.resize(new_size))
 
         pr_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True)
         self._mesh_node = self._scene.add(pr_mesh, pose=np.eye(4))
