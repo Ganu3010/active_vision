@@ -80,7 +80,7 @@ class ShapeNetViewEnv(gym.Env):
         image_size: Tuple[int, int] = (224, 224),
         theta_step_deg: float = 15.0,
         phi_step_deg: float = 15.0,
-        radius: float = 2.0,
+        radius: float = 3.0,
         reward_fn: Optional[Callable] = None,
         categories: Optional[list[str]] = None,
         seed: Optional[int] = None,

@@ -27,53 +27,41 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from shapenet_gym.wrappers import make_training_env
-from shapenet_gym.rewards import classifier_entropy_reward
 
 
 # ---------------------------------------------------------------------------
 # YOLOv8 classifier loader
 # ---------------------------------------------------------------------------
-class YoloClsWrapper(nn.Module):
-    """Thin nn.Module that exposes YOLOv8-cls logits for a (B, 3, 224, 224)
-    float tensor in [0, 1]. We wrap so the reward function can treat it as a
-    standard torch classifier."""
+def make_yolo_entropy_reward(weights_path: str, scale: float = 100.0):
+    """Reward = `scale * (prev_entropy - current_entropy)` using YOLOv8-cls.
 
-    def __init__(self, weights_path: str, device: str):
-        super().__init__()
-        from ultralytics import YOLO
-        yolo = YOLO(weights_path)
-        self.net = yolo.model.to(device).eval()
-        self.device = device
+    Uses ultralytics' high-level predict API which handles preprocessing,
+    device placement, and the cls head correctly. Calling `yolo.model(x)`
+    directly returns wrapped output that doesn't behave as logits.
+    """
+    from ultralytics import YOLO
 
-    @torch.no_grad()
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.net(x.to(self.device))
-        # Ultralytics cls head returns logits directly, but some versions wrap
-        # the result in a tuple/list. Normalize to a tensor.
-        if isinstance(out, (tuple, list)):
-            out = out[0]
-        return out
+    yolo = YOLO(weights_path)
+    prev_entropy = [None]
 
+    def reward_fn(env, action, terminated):
+        obs = env._render_observation()  # (H, W, 3) uint8
+        results = yolo.predict(obs, verbose=False)
+        probs = results[0].probs.data  # tensor shape (1000,)
+        H = -(probs.clamp(min=1e-9) * probs.clamp(min=1e-9).log()).sum().item()
 
-def load_classifier(weights_path: str, device: str):
-    """Return (model, preprocess) for the entropy reward.
+        if prev_entropy[0] is None:
+            prev_entropy[0] = H
+            return 0.0
 
-    `preprocess` maps a (H, W, 3) uint8 numpy image to a (3, 224, 224) float
-    tensor in [0, 1] — the format YOLOv8-cls expects."""
-    model = YoloClsWrapper(weights_path, device=device)
+        delta = prev_entropy[0] - H
+        prev_entropy[0] = H
+        if terminated:
+            prev_entropy[0] = None  # reset for next episode
 
-    def preprocess(obs_np: np.ndarray) -> torch.Tensor:
-        # env renders at 224x224 already (see make_training_env), but keep a
-        # resize for safety.
-        img = torch.from_numpy(obs_np).float().permute(2, 0, 1) / 255.0
-        if img.shape[-2:] != (224, 224):
-            img = F.interpolate(
-                img.unsqueeze(0), size=(224, 224),
-                mode="bilinear", align_corners=False,
-            ).squeeze(0)
-        return img
+        return scale * delta
 
-    return model, preprocess
+    return reward_fn
 
 
 # ---------------------------------------------------------------------------
@@ -90,8 +78,7 @@ def make_env(
     """Build one PPO-ready env. Note: we keep observations as uint8 (C, H, W)
     and let SB3's CnnPolicy handle normalisation — that matches the
     NatureCNN default and avoids double-scaling."""
-    model, preprocess = load_classifier(yolo_weights, device=device)
-    reward_fn = classifier_entropy_reward(model, preprocess, device=device, scale=100.0)
+    reward_fn = make_yolo_entropy_reward(yolo_weights, scale=100.0)
 
     env = make_training_env(
         dataset_root=dataset_root,
