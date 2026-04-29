@@ -78,7 +78,7 @@ def make_env(
     """Build one PPO-ready env. Note: we keep observations as uint8 (C, H, W)
     and let SB3's CnnPolicy handle normalisation — that matches the
     NatureCNN default and avoids double-scaling."""
-    reward_fn = make_yolo_entropy_reward(yolo_weights, scale=100.0)
+    reward_fn = make_yolo_entropy_reward(yolo_weights, scale=10.0)
 
     env = make_training_env(
         dataset_root=dataset_root,
@@ -144,7 +144,7 @@ def train(args: argparse.Namespace):
         device=device,
         n_steps=min(2048, args.total_timesteps),
         batch_size=64,
-        learning_rate=3e-4,
+        learning_rate=1e-4,
         gamma=0.99,
         tensorboard_log=args.logdir if args.use_wandb else None,
         seed=args.seed,
