@@ -45,7 +45,7 @@ def make_yolo_entropy_reward(
     outside the labeled set.
     """
     from shapenet_gym.env import STAY
-    from shapenet_gym.labels import SYNSET_TO_IMAGENET_INDICES
+    from shapenet_gym.labels import is_correct, has_mapping
 
     prev_entropy = [None]
 
@@ -69,13 +69,13 @@ def make_yolo_entropy_reward(
         cost = 0.0 if action == STAY else motion_cost
 
         correctness_term = 0.0
-        if correctness_bonus > 0.0 or incorrect_penalty > 0.0:
-            accepted = SYNSET_TO_IMAGENET_INDICES.get(env.current_synset_id, set())
-            if accepted:
-                if int(np.argmax(probs)) in accepted:
-                    correctness_term = correctness_bonus
-                else:
-                    correctness_term = -incorrect_penalty
+        if (correctness_bonus > 0.0 or incorrect_penalty > 0.0) \
+                and has_mapping(env.current_synset_id):
+            yolo_names = env._yolo.names if env._yolo is not None else {}
+            if is_correct(env.current_synset_id, int(np.argmax(probs)), yolo_names):
+                correctness_term = correctness_bonus
+            else:
+                correctness_term = -incorrect_penalty
 
         return scale * delta - cost + correctness_term
 

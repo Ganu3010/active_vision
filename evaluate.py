@@ -23,7 +23,7 @@ import torch
 from stable_baselines3 import PPO
 from ultralytics import YOLO
 
-from shapenet_gym.labels import SYNSET_TO_IMAGENET_INDICES, SYNSET_TO_NAME, has_mapping
+from shapenet_gym.labels import SYNSET_TO_NAME, has_mapping, is_correct
 from shapenet_gym.wrappers import make_training_env
 
 
@@ -35,17 +35,13 @@ def pick_device() -> str:
     return "cpu"
 
 
-def run_episode(env, policy_fn: Callable, max_steps: int):
-    """Run one episode under `policy_fn` and return per-step diagnostics.
-
-    `policy_fn(obs) -> int` selects the next action.
-    """
+def run_episode(env, policy_fn: Callable, max_steps: int, yolo_names: dict):
+    """Run one episode under `policy_fn` and return per-step diagnostics."""
     obs, info = env.reset()
     synset_id = env.unwrapped.current_synset_id
-    accepted = SYNSET_TO_IMAGENET_INDICES.get(synset_id, set())
 
     top1_probs: list[float] = []
-    top1_correct: list[int] = []  # 1 if top-1 in accepted classes else 0
+    top1_correct: list[int] = []
 
     for _ in range(max_steps):
         action = policy_fn(obs)
@@ -54,7 +50,7 @@ def run_episode(env, policy_fn: Callable, max_steps: int):
         probs = env.unwrapped._last_yolo_probs
         top1_idx = int(np.argmax(probs))
         top1_probs.append(float(probs[top1_idx]))
-        top1_correct.append(1 if top1_idx in accepted else 0)
+        top1_correct.append(1 if is_correct(synset_id, top1_idx, yolo_names) else 0)
 
         if terminated or truncated:
             break
@@ -160,7 +156,7 @@ def main():
         action, _ = model.predict(obs, deterministic=True)
         return action
 
-    records = [run_episode(env, ppo_policy, args.max_steps) for _ in range(args.episodes)]
+    records = [run_episode(env, ppo_policy, args.max_steps, yolo.names) for _ in range(args.episodes)]
     env.close()
 
     summary = aggregate(records, args.threshold)

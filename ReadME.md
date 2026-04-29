@@ -20,7 +20,9 @@ env = shapenet_gym.env.ShapeNetViewEnv(
 ```bash
 pip install stable-baselines3 ultralytics gymnasium trimesh pyrender \
             opencv-python torch torchvision \
-            "PyOpenGL>=3.1.7" PyOpenGL-accelerate
+            "PyOpenGL>=3.1.7" PyOpenGL-accelerate \
+            nltk
+python -c "import nltk; nltk.download('wordnet')"   # for ShapeNet/ImageNet correctness mapping
 # optional, for live training dashboards
 pip install wandb
 ```

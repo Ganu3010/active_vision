@@ -1,66 +1,41 @@
 """
-ShapeNet synset -> ImageNet class index mapping.
+ShapeNet synset -> WordNet target mapping for "is YOLO right?" checks.
 
-YOLOv8-cls outputs probabilities over the 1000 ImageNet classes; ShapeNet
-ground truth uses synset IDs. This module bridges the two for evaluation:
-given a ShapeNet object and a YOLO top-1 prediction, decide whether the
-prediction is "correct."
+ShapeNet synset IDs are WordNet noun-offsets (e.g. 02958343 = car.n.01).
+ImageNet classes are also WordNet synsets. ShapeNet's intended grouping is
+typically broader than the WordNet synset itself (ShapeNet "car" includes
+trucks/pickups, "airplane" includes warplanes/airships), so each synset is
+mapped to a *target ancestor* — any prediction that's a hyponym of the
+target counts as correct.
 
-Used by `evaluate.py` only — never imported by `train_ppo.py` or the env.
-The training reward is entropy-only and does not consult these labels.
-
-A ShapeNet synset maps to a *set* of ImageNet indices because most ShapeNet
-categories correspond to multiple ImageNet sub-types (e.g., ShapeNet "car"
-includes any of {sports_car, convertible, limousine, ...}).
-
-ImageNet indices verified against torchvision's ImageNet1k labels.
+Used by `evaluate.py` and the optional correctness term in the training
+reward.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
 
-# ShapeNet synset_id -> set of ImageNet-1k class indices that count as "correct"
-SYNSET_TO_IMAGENET_INDICES: dict[str, set[int]] = {
-    # 02691156 airplane
-    "02691156": {404, 895, 812},          # airliner, warplane, space_shuttle
+from nltk.corpus import wordnet as wn
 
-    # 02958343 car
-    "02958343": {817, 511, 627, 751, 468, 656, 609, 717, 661},
-    # sports_car, convertible, limousine, racer, cab, minivan, jeep, pickup, Model_T
 
-    # 03001627 chair
-    "03001627": {857, 559, 423, 765},     # throne, folding_chair, barber_chair, rocking_chair
-
-    # 04379243 table
-    "04379243": {532, 526},               # dining_table, desk
-
-    # 03211117 display / monitor
-    "03211117": {664, 782, 851},          # monitor, screen, television
-
-    # 03046257 clock
-    "03046257": {409, 530, 892},          # analog_clock, digital_clock, wall_clock
-
-    # 03642806 laptop
-    "03642806": {620, 681},               # laptop, notebook
-
-    # 03467517 guitar
-    "03467517": {402, 546},               # acoustic_guitar, electric_guitar
-
-    # 03790512 motorcycle
-    "03790512": {670, 665},               # motor_scooter, moped
-
-    # 03636649 lamp
-    "03636649": {846, 818},               # table_lamp, spotlight
-
-    # 04256520 sofa
-    "04256520": {831},                    # studio_couch
-
-    # 03797390 mug
-    "03797390": {504, 968},               # coffee_mug, cup
+# ShapeNet synset_id -> WordNet target ancestor.
+# Predictions count as correct if they are this synset or a hyponym of it.
+SYNSET_TO_TARGET: dict[str, str] = {
+    "02691156": "aircraft.n.01",            # airplane: airliner / warplane / airship / space_shuttle
+    "02958343": "motor_vehicle.n.01",       # car: car / truck / van / pickup / ambulance
+    "03001627": "chair.n.01",
+    "04379243": "table.n.01",
+    "03211117": "display.n.06",             # monitor / screen / television
+    "03046257": "timepiece.n.01",           # clock / watch
+    "03642806": "personal_computer.n.01",   # laptop / notebook / desktop
+    "03467517": "guitar.n.01",
+    "03790512": "motor_scooter.n.01",       # motorcycle-ish; covers scooter / moped
+    "03636649": "lamp.n.02",                # source of artificial light
+    "04256520": "sofa.n.01",
+    "03797390": "mug.n.04",                 # cup / coffee_mug
 }
 
-
-# Human-readable names — for log/eval output
 SYNSET_TO_NAME: dict[str, str] = {
     "02691156": "airplane",
     "02958343": "car",
@@ -77,17 +52,35 @@ SYNSET_TO_NAME: dict[str, str] = {
 }
 
 
-def is_correct(synset_id: str, predicted_imagenet_idx: int) -> bool:
-    """Return True if the YOLO prediction is one of the accepted ImageNet
-    classes for the given ShapeNet synset.
+@lru_cache(maxsize=2000)
+def _synset_for_name(name: str):
+    """Look up the first noun synset for an ImageNet class name (underscored)."""
+    if not name:
+        return None
+    syns = wn.synsets(name, pos="n")
+    return syns[0] if syns else None
 
-    Synsets without a defined mapping return False — by design, callers
-    should filter those out before calling is_correct(), or accept that
-    those synsets will count as 0% accuracy.
+
+@lru_cache(maxsize=128)
+def _target_synset(shapenet_synset_id: str):
+    target_name = SYNSET_TO_TARGET.get(shapenet_synset_id)
+    return wn.synset(target_name) if target_name else None
+
+
+def is_correct(shapenet_synset_id: str, predicted_idx: int, yolo_names: dict) -> bool:
+    """True if the YOLO prediction is a hyponym of (or equal to) the
+    target ancestor for this ShapeNet synset.
+
+    `yolo_names` is the dict from `YOLO('weights').names` — `{idx: 'name'}`.
     """
-    return predicted_imagenet_idx in SYNSET_TO_IMAGENET_INDICES.get(synset_id, set())
+    target = _target_synset(shapenet_synset_id)
+    if target is None:
+        return False
+    pred = _synset_for_name(yolo_names.get(predicted_idx))
+    if pred is None:
+        return False
+    return pred == target or target in pred.closure(lambda s: s.hypernyms())
 
 
 def has_mapping(synset_id: str) -> bool:
-    """Whether this synset has any ImageNet correspondents defined."""
-    return synset_id in SYNSET_TO_IMAGENET_INDICES
+    return synset_id in SYNSET_TO_TARGET
