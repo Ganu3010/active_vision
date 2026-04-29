@@ -29,15 +29,22 @@ from shapenet_gym.wrappers import make_training_env
 # ---------------------------------------------------------------------------
 # Reward function
 # ---------------------------------------------------------------------------
-def make_yolo_entropy_reward(scale: float = 10.0, motion_cost: float = 0.05):
-    """Reward = `scale * (prev_entropy - current_entropy) - motion_cost`.
+def make_yolo_entropy_reward(
+    scale: float = 10.0,
+    motion_cost: float = 0.05,
+    correctness_bonus: float = 0.0,
+):
+    """Reward = scale * (prev_entropy - current_entropy)
+              - motion_cost (on non-STAY actions)
+              + correctness_bonus (on steps where YOLO's top-1 is correct).
 
-    `motion_cost` is subtracted on every non-STAY action to discourage
-    aimless wandering once the agent finds an informative view. Reads cached
-    YOLO probs from `env._last_yolo_probs` to avoid duplicate inference with
-    the observation wrapper.
+    `correctness_bonus > 0` enables the per-step correctness signal — at every
+    step, if `argmax(yolo_probs)` is in `SYNSET_TO_IMAGENET_INDICES[synset_id]`,
+    the agent earns the bonus. Synsets not in the mapping never trigger it.
     """
     from shapenet_gym.env import STAY
+    from shapenet_gym.labels import SYNSET_TO_IMAGENET_INDICES
+
     prev_entropy = [None]
 
     def reward_fn(env, action, terminated):
@@ -58,7 +65,14 @@ def make_yolo_entropy_reward(scale: float = 10.0, motion_cost: float = 0.05):
             prev_entropy[0] = None
 
         cost = 0.0 if action == STAY else motion_cost
-        return scale * delta - cost
+
+        bonus = 0.0
+        if correctness_bonus > 0.0:
+            accepted = SYNSET_TO_IMAGENET_INDICES.get(env.current_synset_id, set())
+            if accepted and int(np.argmax(probs)) in accepted:
+                bonus = correctness_bonus
+
+        return scale * delta - cost + bonus
 
     return reward_fn
 
@@ -72,10 +86,11 @@ def make_env(
     yolo,
     categories: list[str] | None = None,
     seed: int | None = None,
+    upper_hemisphere_only: bool = False,
 ):
     """Build one PPO-ready env with multi-input observation (image + YOLO
     probs + pose + summary stats)."""
-    reward_fn = make_yolo_entropy_reward(scale=10.0)
+    reward_fn = make_yolo_entropy_reward(scale=15.0, correctness_bonus=1.0)
 
     env = make_training_env(
         dataset_root=dataset_root,
@@ -88,6 +103,7 @@ def make_env(
         grayscale=False,
         seed=seed,
         yolo_model=yolo,           # enables YoloPoseObservationWrapper
+        upper_hemisphere_only=upper_hemisphere_only,
     )
     env = Monitor(env)
     return env
@@ -135,6 +151,7 @@ def train(args: argparse.Namespace):
             yolo=yolo,
             categories=args.categories,
             seed=args.seed,
+            upper_hemisphere_only=args.upper_hemisphere_only,
         )
     ])
 
@@ -148,7 +165,7 @@ def train(args: argparse.Namespace):
         device=device,
         n_steps=min(2048, args.total_timesteps),
         batch_size=64,
-        learning_rate=1e-4,
+        learning_rate=2e-4,
         gamma=0.99,
         tensorboard_log=args.logdir if args.use_wandb else None,
         seed=args.seed,
@@ -188,6 +205,7 @@ def parse_args() -> argparse.Namespace:
         help="Synset IDs to train on. Pass --categories '' to use all extracted folders.",
     )
     p.add_argument("--use_wandb", action="store_true")
+    p.add_argument("--upper_hemisphere_only", action="store_true")
     return p.parse_args()
 
 
