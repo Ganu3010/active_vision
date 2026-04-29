@@ -14,13 +14,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
@@ -30,36 +27,38 @@ from shapenet_gym.wrappers import make_training_env
 
 
 # ---------------------------------------------------------------------------
-# YOLOv8 classifier loader
+# Reward function
 # ---------------------------------------------------------------------------
-def make_yolo_entropy_reward(weights_path: str, scale: float = 100.0):
-    """Reward = `scale * (prev_entropy - current_entropy)` using YOLOv8-cls.
+def make_yolo_entropy_reward(scale: float = 10.0, motion_cost: float = 0.05):
+    """Reward = `scale * (prev_entropy - current_entropy) - motion_cost`.
 
-    Uses ultralytics' high-level predict API which handles preprocessing,
-    device placement, and the cls head correctly. Calling `yolo.model(x)`
-    directly returns wrapped output that doesn't behave as logits.
+    `motion_cost` is subtracted on every non-STAY action to discourage
+    aimless wandering once the agent finds an informative view. Reads cached
+    YOLO probs from `env._last_yolo_probs` to avoid duplicate inference with
+    the observation wrapper.
     """
-    from ultralytics import YOLO
-
-    yolo = YOLO(weights_path)
+    from shapenet_gym.env import STAY
     prev_entropy = [None]
 
     def reward_fn(env, action, terminated):
-        obs = env._render_observation()  # (H, W, 3) uint8
-        results = yolo.predict(obs, verbose=False)
-        probs = results[0].probs.data  # tensor shape (1000,)
-        H = -(probs.clamp(min=1e-9) * probs.clamp(min=1e-9).log()).sum().item()
+        probs = env._last_yolo_probs
+        if probs is None:
+            return 0.0
+        clipped = np.maximum(probs, 1e-9)
+        H = float(-(probs * np.log(clipped)).sum())
 
         if prev_entropy[0] is None:
             prev_entropy[0] = H
-            return 0.0
+            delta = 0.0
+        else:
+            delta = prev_entropy[0] - H
+            prev_entropy[0] = H
 
-        delta = prev_entropy[0] - H
-        prev_entropy[0] = H
         if terminated:
-            prev_entropy[0] = None  # reset for next episode
+            prev_entropy[0] = None
 
-        return scale * delta
+        cost = 0.0 if action == STAY else motion_cost
+        return scale * delta - cost
 
     return reward_fn
 
@@ -70,28 +69,27 @@ def make_yolo_entropy_reward(weights_path: str, scale: float = 100.0):
 def make_env(
     dataset_root: str,
     max_steps: int,
-    yolo_weights: str,
-    device: str,
+    yolo,
     categories: list[str] | None = None,
     seed: int | None = None,
 ):
-    """Build one PPO-ready env. Note: we keep observations as uint8 (C, H, W)
-    and let SB3's CnnPolicy handle normalisation — that matches the
-    NatureCNN default and avoids double-scaling."""
-    reward_fn = make_yolo_entropy_reward(yolo_weights, scale=10.0)
+    """Build one PPO-ready env with multi-input observation (image + YOLO
+    probs + pose + summary stats)."""
+    reward_fn = make_yolo_entropy_reward(scale=10.0)
 
     env = make_training_env(
         dataset_root=dataset_root,
-        image_size=(84, 84),       # PPO policy input
+        image_size=(84, 84),       # policy CNN input
         max_steps=max_steps,
-        categories=categories,     # pin to specific synsets if provided
+        categories=categories,
         reward_fn=reward_fn,
         channel_first=True,        # (C, H, W) for PyTorch
-        normalize=False,           # keep uint8 — SB3 CnnPolicy /255 internally
+        normalize=False,           # keep uint8 — CombinedExtractor /255 internally
         grayscale=False,
         seed=seed,
+        yolo_model=yolo,           # enables YoloPoseObservationWrapper
     )
-    env = Monitor(env)             # logs episode reward/length
+    env = Monitor(env)
     return env
 
 
@@ -124,21 +122,27 @@ def train(args: argparse.Namespace):
         )
         callback = WandbCallback(verbose=2)
 
+    # One shared YOLO instance — used by both the env (for the cached probs in
+    # the multi-input observation) and the entropy reward.
+    from ultralytics import YOLO
+    yolo = YOLO(args.yolo_weights)
+
     # Build env — wrap in DummyVecEnv (SB3 requires a VecEnv)
     env = DummyVecEnv([
         lambda: make_env(
             dataset_root=args.dataset_root,
             max_steps=args.max_steps,
-            yolo_weights=args.yolo_weights,
-            device=device,
+            yolo=yolo,
             categories=args.categories,
             seed=args.seed,
         )
     ])
 
-    # PPO with CnnPolicy — input is (3, 84, 84) uint8, policy uses NatureCNN.
+    # MultiInputPolicy — Dict observation (image + yolo_probs + pose + summary).
+    # SB3's CombinedExtractor uses NatureCNN for "image" and small MLPs for the
+    # vector keys, then concatenates.
     model = PPO(
-        policy="CnnPolicy",
+        policy="MultiInputPolicy",
         env=env,
         verbose=1,
         device=device,

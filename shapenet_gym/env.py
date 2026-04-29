@@ -33,8 +33,8 @@ from .dataset import ShapeNetDataset
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3
-ACTION_NAMES = {UP: "UP", DOWN: "DOWN", LEFT: "LEFT", RIGHT: "RIGHT"}
+UP, DOWN, LEFT, RIGHT, STAY = 0, 1, 2, 3, 4
+ACTION_NAMES = {UP: "UP", DOWN: "DOWN", LEFT: "LEFT", RIGHT: "RIGHT", STAY: "STAY"}
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,8 @@ class ShapeNetViewEnv(gym.Env):
         seed: Optional[int] = None,
         render_mode: str = "rgb_array",
         offscreen: bool = True,
+        yolo_model=None,
+        upper_hemisphere_only: bool = False,
     ):
         super().__init__()
 
@@ -98,9 +100,14 @@ class ShapeNetViewEnv(gym.Env):
         self.reward_fn = reward_fn or self._default_reward
         self.render_mode = render_mode
         self.offscreen = offscreen
+        # Optional shared classifier — when provided, every render also caches
+        # the softmax probs on the env so reward + observation wrappers can
+        # reuse a single inference call per step.
+        self._yolo = yolo_model
+        self._last_yolo_probs: Optional[np.ndarray] = None
+        self._upper_hemisphere_only = upper_hemisphere_only
 
-        # Action & observation spaces
-        self.action_space = spaces.Discrete(4)
+        self.action_space = spaces.Discrete(5)
         H, W = image_size
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(H, W, 3), dtype=np.uint8
@@ -144,8 +151,10 @@ class ShapeNetViewEnv(gym.Env):
         self._current_obj = self._dataset.sample(rng=self._rng)
         self._renderer.load_mesh(self._current_obj["mesh_path"])
 
-        # Random initial viewpoint
-        self._theta = float(self._rng.uniform(-math.pi / 3, math.pi / 3))
+        if self._upper_hemisphere_only:
+            self._theta = float(self._rng.uniform(0, math.pi / 3))
+        else:
+            self._theta = float(self._rng.uniform(-math.pi / 3, math.pi / 3))
         self._phi = float(self._rng.uniform(0, 2 * math.pi))
         self._steps = 0
 
@@ -186,15 +195,17 @@ class ShapeNetViewEnv(gym.Env):
     # Internal helpers
     # ------------------------------------------------------------------
     def _apply_action(self, action: int):
-        """Update spherical coordinates based on the chosen action."""
         if action == UP:
             self._theta = min(self._theta + self.theta_step, math.pi / 2 - 1e-4)
         elif action == DOWN:
-            self._theta = max(self._theta - self.theta_step, -math.pi / 2 + 1e-4)
+            lower = 0.0 if self._upper_hemisphere_only else -math.pi / 2 + 1e-4
+            self._theta = max(self._theta - self.theta_step, lower)
         elif action == LEFT:
             self._phi = (self._phi - self.phi_step) % (2 * math.pi)
         elif action == RIGHT:
             self._phi = (self._phi + self.phi_step) % (2 * math.pi)
+        elif action == STAY:
+            pass
 
     def _camera_position(self) -> np.ndarray:
         """Convert (radius, theta, phi) → Cartesian camera position."""
@@ -207,11 +218,17 @@ class ShapeNetViewEnv(gym.Env):
 
     def _render_observation(self) -> np.ndarray:
         cam_pos = self._camera_position()
-        return self._renderer.render(
+        img = self._renderer.render(
             camera_pos=cam_pos,
             look_at=np.zeros(3, dtype=np.float32),
             up=np.array([0.0, 0.0, 1.0], dtype=np.float32),
         )
+        if self._yolo is not None:
+            results = self._yolo.predict(img, verbose=False)
+            self._last_yolo_probs = (
+                results[0].probs.data.cpu().numpy().astype(np.float32)
+            )
+        return img
 
     def _build_info(self) -> dict:
         return {

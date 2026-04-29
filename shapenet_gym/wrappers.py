@@ -130,13 +130,87 @@ class ViewpointAugmentationWrapper(gym.Wrapper):
         self.env.unwrapped._phi = (
             self.env.unwrapped._phi + float(np.random.normal(0, self._phi_noise))
         ) % (2 * math.pi)
-        # Clamp elevation
+        lower = 0.0 if getattr(self.env.unwrapped, "_upper_hemisphere_only", False) else -math.pi / 2 + 1e-4
         self.env.unwrapped._theta = np.clip(
-            self.env.unwrapped._theta, -math.pi / 2 + 1e-4, math.pi / 2 - 1e-4
+            self.env.unwrapped._theta, lower, math.pi / 2 - 1e-4
         )
         # Re-render after perturbation
         obs = self.env.unwrapped._render_observation()
         return obs, info
+
+
+class YoloPoseObservationWrapper(gym.Wrapper):
+    """Augment the image observation with YOLO probs, camera pose, and summary
+    stats — the multi-input observation specified in the project proposal.
+
+    Requires the underlying env to have a `yolo_model` set (it caches probs on
+    `env._last_yolo_probs` after each render). Apply this wrapper *last*, so it
+    sees the already-resized / channel-first image as the `image` key.
+
+    Output observation:
+        {
+          "image":      same Box as the inner env (e.g. (3, 84, 84) uint8)
+          "yolo_probs": Box(0, 1, (1000,), float32)
+          "pose":       Box(-1, 1, (4,), float32)  -> (sin θ, cos θ, sin φ, cos φ)
+          "summary":    Box(0, 7, (3,), float32)   -> (entropy, top1_prob, top1_top2_margin)
+        }
+    """
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        if getattr(env.unwrapped, "_yolo", None) is None:
+            raise ValueError(
+                "YoloPoseObservationWrapper requires the underlying env to "
+                "have yolo_model set. Pass yolo_model=... to ShapeNetViewEnv."
+            )
+        self._n_classes = 1000
+        self.observation_space = gym.spaces.Dict({
+            "image": env.observation_space,
+            "yolo_probs": gym.spaces.Box(
+                low=0.0, high=1.0, shape=(self._n_classes,), dtype=np.float32,
+            ),
+            "pose": gym.spaces.Box(
+                low=-1.0, high=1.0, shape=(4,), dtype=np.float32,
+            ),
+            "summary": gym.spaces.Box(
+                low=0.0, high=float(np.log(self._n_classes)) + 1e-3,
+                shape=(3,), dtype=np.float32,
+            ),
+        })
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return self._build_obs(obs), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return self._build_obs(obs), reward, terminated, truncated, info
+
+    def _build_obs(self, image_obs: np.ndarray) -> dict:
+        import math
+        env = self.env.unwrapped
+        probs = env._last_yolo_probs
+        if probs is None:
+            probs = np.full(self._n_classes, 1.0 / self._n_classes, dtype=np.float32)
+
+        clipped = np.maximum(probs, 1e-9)
+        H = float(-(probs * np.log(clipped)).sum())
+        sorted_probs = np.sort(probs)[::-1]
+        margin = float(sorted_probs[0] - sorted_probs[1])
+
+        theta, phi = env._theta, env._phi
+        pose = np.array(
+            [math.sin(theta), math.cos(theta), math.sin(phi), math.cos(phi)],
+            dtype=np.float32,
+        )
+        summary = np.array([H, float(sorted_probs[0]), margin], dtype=np.float32)
+
+        return {
+            "image": image_obs,
+            "yolo_probs": probs.astype(np.float32),
+            "pose": pose,
+            "summary": summary,
+        }
 
 
 def make_training_env(
@@ -149,6 +223,8 @@ def make_training_env(
     normalize: bool = True,
     grayscale: bool = False,
     seed: Optional[int] = None,
+    yolo_model=None,
+    upper_hemisphere_only: bool = False,
 ) -> gym.Env:
     """
     Factory that builds a fully-wrapped ShapeNetViewEnv ready for training.
@@ -189,6 +265,8 @@ def make_training_env(
         reward_fn=reward_fn,
         seed=seed,
         offscreen=True,
+        yolo_model=yolo_model,
+        upper_hemisphere_only=upper_hemisphere_only,
     )
     env = ViewpointAugmentationWrapper(env)
     if grayscale:
@@ -198,4 +276,6 @@ def make_training_env(
         env = ChannelFirstWrapper(env)
     if normalize:
         env = NormalizeWrapper(env)
+    if yolo_model is not None:
+        env = YoloPoseObservationWrapper(env)
     return env
