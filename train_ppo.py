@@ -96,7 +96,7 @@ def make_env(
     """Build one PPO-ready env with multi-input observation (image + YOLO
     probs + pose + summary stats)."""
     reward_fn = make_yolo_entropy_reward(
-        scale=10.0, correctness_bonus=4.0, incorrect_penalty=1.0,
+        scale=10.0, correctness_bonus=4.0, incorrect_penalty=0.1,
     )
 
     env = make_training_env(

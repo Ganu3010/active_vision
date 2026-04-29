@@ -129,6 +129,14 @@ class MeshRenderer:
         else:
             mesh = loaded
 
+        # ShapeNet meshes use Y-up; our world is Z-up. Rotate so the
+        # object's natural up direction aligns with the camera's up vector.
+        mesh.apply_transform(
+            trimesh.transformations.rotation_matrix(
+                np.pi / 2, [1.0, 0.0, 0.0]
+            )
+        )
+
         # Centre and scale to unit sphere
         mesh.vertices -= mesh.bounding_box.centroid
         scale = mesh.bounding_sphere.primitive.radius
