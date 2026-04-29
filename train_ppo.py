@@ -33,14 +33,16 @@ def make_yolo_entropy_reward(
     scale: float = 10.0,
     motion_cost: float = 0.05,
     correctness_bonus: float = 0.0,
+    incorrect_penalty: float = 0.0,
 ):
     """Reward = scale * (prev_entropy - current_entropy)
               - motion_cost (on non-STAY actions)
-              + correctness_bonus (on steps where YOLO's top-1 is correct).
+              + correctness_bonus  (top-1 in accepted set)
+              - incorrect_penalty  (top-1 outside accepted set)
 
-    `correctness_bonus > 0` enables the per-step correctness signal — at every
-    step, if `argmax(yolo_probs)` is in `SYNSET_TO_IMAGENET_INDICES[synset_id]`,
-    the agent earns the bonus. Synsets not in the mapping never trigger it.
+    Bonus / penalty are skipped for synsets without an entry in
+    `SYNSET_TO_IMAGENET_INDICES` so the agent isn't punished for things
+    outside the labeled set.
     """
     from shapenet_gym.env import STAY
     from shapenet_gym.labels import SYNSET_TO_IMAGENET_INDICES
@@ -66,13 +68,16 @@ def make_yolo_entropy_reward(
 
         cost = 0.0 if action == STAY else motion_cost
 
-        bonus = 0.0
-        if correctness_bonus > 0.0:
+        correctness_term = 0.0
+        if correctness_bonus > 0.0 or incorrect_penalty > 0.0:
             accepted = SYNSET_TO_IMAGENET_INDICES.get(env.current_synset_id, set())
-            if accepted and int(np.argmax(probs)) in accepted:
-                bonus = correctness_bonus
+            if accepted:
+                if int(np.argmax(probs)) in accepted:
+                    correctness_term = correctness_bonus
+                else:
+                    correctness_term = -incorrect_penalty
 
-        return scale * delta - cost + bonus
+        return scale * delta - cost + correctness_term
 
     return reward_fn
 
@@ -90,7 +95,9 @@ def make_env(
 ):
     """Build one PPO-ready env with multi-input observation (image + YOLO
     probs + pose + summary stats)."""
-    reward_fn = make_yolo_entropy_reward(scale=15.0, correctness_bonus=1.0)
+    reward_fn = make_yolo_entropy_reward(
+        scale=10.0, correctness_bonus=4.0, incorrect_penalty=1.0,
+    )
 
     env = make_training_env(
         dataset_root=dataset_root,
