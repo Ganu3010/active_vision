@@ -21,43 +21,49 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+# pyrender (≤0.1.45) still references np.infty, removed in NumPy 2.0.
+if not hasattr(np, "infty"):
+    np.infty = np.inf
+
+
+GROUND_Z = -1.0
+GROUND_EXTENT = 10.0
+
 
 class MeshRenderer:
-    """Thin wrapper around pyrender for off-screen rendering.
+    """Off-screen pyrender wrapper with realistic-ish lighting and background.
 
-    Parameters
-    ----------
-    image_size:
-        (height, width) of the output image in pixels.
-    offscreen:
-        If True (default), render without a display (requires osmesa or egl).
-        Set False only when a real display is available.
-    background_color:
-        RGBA background colour (floats 0–1).
-    ambient_light:
-        Ambient light intensity.
+    Scene layout: object centred at origin, normalised to unit sphere; ground
+    plane at z=GROUND_Z; key+fill directional lights, key casts shadows;
+    background composited as a vertical sky-ground gradient (lighter at +z
+    image side).
     """
 
     def __init__(
         self,
         image_size: Tuple[int, int] = (224, 224),
         offscreen: bool = True,
-        background_color: Tuple[float, ...] = (0.1, 0.1, 0.1, 1.0),
-        ambient_light: float = 0.4,
+        ambient_light: float = 0.3,
+        sky_color: Tuple[float, float, float] = (0.78, 0.82, 0.88),
+        ground_color: Tuple[float, float, float] = (0.28, 0.26, 0.24),
+        key_intensity: float = 4.0,
+        fill_ratio: float = 0.3,
     ):
         self.image_size = image_size  # (H, W)
         self.offscreen = offscreen
-        self.background_color = np.array(background_color, dtype=np.float32)
         self.ambient_light = ambient_light
+        self.sky_color = np.array(sky_color, dtype=np.float32)
+        self.ground_color = np.array(ground_color, dtype=np.float32)
+        self.key_intensity = key_intensity
+        self.fill_ratio = fill_ratio
 
         self._scene = None
         self._renderer = None
         self._mesh_node = None
         self._camera_node = None
+        self._gradient_bg = None  # precomputed (H, W, 3) uint8
+        self._mesh_center = np.zeros(3, dtype=np.float32)
 
-        # Choose platform before importing pyrender.
-        # On Linux headless we need osmesa/egl; on macOS PyOpenGL auto-selects
-        # the native CGL backend which works offscreen via pyglet.
         import sys
         if (
             offscreen
@@ -67,6 +73,7 @@ class MeshRenderer:
             os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
         self._init_scene()
+        self._init_gradient()
 
     # ------------------------------------------------------------------
     def _init_scene(self):
@@ -76,33 +83,62 @@ class MeshRenderer:
         H, W = self.image_size
 
         self._scene = pyrender.Scene(
-            bg_color=self.background_color,
+            bg_color=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
             ambient_light=np.array([self.ambient_light] * 3),
         )
 
-        # Directional lights for good 3D shape perception
-        for direction in [
-            [1.0, 1.0, 1.0],
-            [-1.0, -0.5, 0.5],
-            [0.0, -1.0, 0.3],
-        ]:
-            light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=2.0)
-            pose = self._look_at(
-                eye=np.array(direction, dtype=np.float64),
-                center=np.zeros(3),
-                up=np.array([0.0, 0.0, 1.0]),
-            )
-            self._scene.add(light, pose=pose)
+        key_dir = np.array([-0.3, -0.5, -1.0])
+        key_dir /= np.linalg.norm(key_dir)
+        key_light = pyrender.DirectionalLight(
+            color=[1.0, 1.0, 1.0], intensity=self.key_intensity
+        )
+        key_pose = self._look_at(
+            eye=-key_dir * 3.0, center=np.zeros(3), up=np.array([0.0, 0.0, 1.0])
+        )
+        self._scene.add(key_light, pose=key_pose)
 
-        # Perspective camera (will be repositioned each render call)
+        fill_dir = np.array([0.6, 0.4, -0.4])
+        fill_dir /= np.linalg.norm(fill_dir)
+        fill_light = pyrender.DirectionalLight(
+            color=[1.0, 1.0, 1.0],
+            intensity=self.key_intensity * self.fill_ratio,
+        )
+        fill_pose = self._look_at(
+            eye=-fill_dir * 3.0, center=np.zeros(3), up=np.array([0.0, 0.0, 1.0])
+        )
+        self._scene.add(fill_light, pose=fill_pose)
+
+        ground = trimesh.creation.box(
+            extents=[GROUND_EXTENT, GROUND_EXTENT, 0.02]
+        )
+        ground.apply_translation([0.0, 0.0, GROUND_Z - 0.01])
+        ground.visual = trimesh.visual.ColorVisuals(
+            mesh=ground,
+            vertex_colors=np.tile(
+                [int(self.ground_color[0] * 255),
+                 int(self.ground_color[1] * 255),
+                 int(self.ground_color[2] * 255), 255],
+                (len(ground.vertices), 1),
+            ),
+        )
+        pr_ground = pyrender.Mesh.from_trimesh(ground, smooth=False)
+        self._scene.add(pr_ground, pose=np.eye(4))
+
         camera = pyrender.PerspectiveCamera(yfov=np.pi / 4.0, aspectRatio=W / H)
         self._camera_node = self._scene.add(camera, pose=np.eye(4))
 
-        # Off-screen renderer
         self._renderer = pyrender.OffscreenRenderer(
             viewport_width=W,
             viewport_height=H,
         )
+
+    # ------------------------------------------------------------------
+    def _init_gradient(self):
+        H, W = self.image_size
+        t = np.linspace(0.0, 1.0, H, dtype=np.float32)[:, None]  # 0=top
+        col = (1.0 - t) * self.sky_color + t * self.ground_color
+        bg = np.tile(col[:, None, :], (1, W, 1))
+        self._gradient_bg = (bg * 255.0).clip(0, 255).astype(np.uint8)
 
     # ------------------------------------------------------------------
     def load_mesh(self, mesh_path: Path | str):
@@ -112,15 +148,12 @@ class MeshRenderer:
 
         mesh_path = Path(mesh_path)
 
-        # Remove previous mesh node
         if self._mesh_node is not None:
             self._scene.remove_node(self._mesh_node)
             self._mesh_node = None
 
-        # Load & normalise the mesh
         loaded = trimesh.load(str(mesh_path), force="mesh", process=True)
 
-        # Handle scenes with multiple geometries
         if isinstance(loaded, trimesh.Scene):
             geometries = list(loaded.geometry.values())
             if not geometries:
@@ -129,29 +162,27 @@ class MeshRenderer:
         else:
             mesh = loaded
 
-        # ShapeNet meshes use Y-up; our world is Z-up. Rotate so the
-        # object's natural up direction aligns with the camera's up vector.
         mesh.apply_transform(
             trimesh.transformations.rotation_matrix(
                 np.pi / 2, [1.0, 0.0, 0.0]
             )
         )
 
-        # Centre and scale to unit sphere
         mesh.vertices -= mesh.bounding_box.centroid
         scale = mesh.bounding_sphere.primitive.radius
         if scale > 0:
             mesh.vertices /= scale
 
-        # Apply a default material if none exists
+        # Drop the object so its lowest point sits on the ground plane.
+        mesh.vertices[:, 2] -= mesh.vertices[:, 2].min() - GROUND_Z
+        self._mesh_center = mesh.bounding_box.centroid.astype(np.float32)
+
         if not hasattr(mesh.visual, "material") or mesh.visual.material is None:
             mesh.visual = trimesh.visual.ColorVisuals(
                 mesh=mesh,
                 vertex_colors=np.tile([180, 180, 200, 255], (len(mesh.vertices), 1)),
             )
 
-        # Some ShapeNet meshes ship absurdly large textures (e.g. 32768×4096)
-        # that exceed GL_MAX_TEXTURE_SIZE. Downscale on the fly.
         _MAX_TEX = 2048
         material = getattr(mesh.visual, "material", None)
         if material is not None:
@@ -160,8 +191,8 @@ class MeshRenderer:
                 if img is not None and hasattr(img, "size"):
                     w, h = img.size
                     if max(w, h) > _MAX_TEX:
-                        scale = _MAX_TEX / max(w, h)
-                        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                        s = _MAX_TEX / max(w, h)
+                        new_size = (max(1, int(w * s)), max(1, int(h * s)))
                         setattr(material, attr, img.resize(new_size))
 
         pr_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True)
@@ -174,34 +205,25 @@ class MeshRenderer:
         look_at: np.ndarray,
         up: np.ndarray,
     ) -> np.ndarray:
-        """Render the current scene from the given camera position.
-
-        Parameters
-        ----------
-        camera_pos:
-            3D position of the camera.
-        look_at:
-            3D point the camera is looking at.
-        up:
-            Up vector for the camera.
-
-        Returns
-        -------
-        np.ndarray
-            Shape (H, W, 3), dtype uint8.
-        """
+        """Render the current scene from the given camera position."""
         import pyrender
 
-        cam_pose = self._look_at(camera_pos.astype(np.float64),
-                                  look_at.astype(np.float64),
-                                  up.astype(np.float64))
+        # Offset both camera and look-at by the mesh's post-drop centre so
+        # the env's origin-relative spherical pose still frames the object.
+        offset = self._mesh_center.astype(np.float64)
+        cam_pose = self._look_at(camera_pos.astype(np.float64) + offset,
+                                 look_at.astype(np.float64) + offset,
+                                 up.astype(np.float64))
         self._scene.set_pose(self._camera_node, cam_pose)
 
-        color, _ = self._renderer.render(
-            self._scene,
-            flags=pyrender.RenderFlags.RGBA,
-        )
-        return color[:, :, :3]  # drop alpha
+        flags = pyrender.RenderFlags.RGBA | pyrender.RenderFlags.SHADOWS_DIRECTIONAL
+        color, _ = self._renderer.render(self._scene, flags=flags)
+
+        rgb = color[:, :, :3].astype(np.float32)
+        alpha = (color[:, :, 3:4].astype(np.float32)) / 255.0
+        bg = self._gradient_bg.astype(np.float32)
+        out = rgb * alpha + bg * (1.0 - alpha)
+        return out.clip(0, 255).astype(np.uint8)
 
     # ------------------------------------------------------------------
     def close(self):
@@ -236,6 +258,6 @@ class MeshRenderer:
         pose = np.eye(4)
         pose[:3, 0] = right
         pose[:3, 1] = true_up
-        pose[:3, 2] = -f   # OpenGL convention: camera looks along -Z
+        pose[:3, 2] = -f
         pose[:3, 3] = eye
         return pose
