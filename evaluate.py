@@ -127,6 +127,7 @@ def main():
     p.add_argument("--threshold", type=float, default=0.85)
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--out_dir", type=str, default="outputs/eval")
+    p.add_argument("--upper_hemisphere_only", action="store_true")
     args = p.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -148,6 +149,7 @@ def main():
         grayscale=False,
         seed=args.seed,
         yolo_model=yolo,
+        upper_hemisphere_only=args.upper_hemisphere_only,
     )
 
     model = PPO.load(args.model_path, device=device)
