@@ -24,7 +24,7 @@ pip install stable-baselines3 ultralytics gymnasium trimesh pyrender \
             nltk
 python -c "import nltk; nltk.download('wordnet')"   # for ShapeNet/ImageNet correctness mapping
 # optional, for live training dashboards
-pip install wandb
+pip install wandb tensorboard
 ```
 
 ### 2. Download the dataset
@@ -94,14 +94,32 @@ CUDA automatically if installed.
 ### Common flags
 
 ```
---max_steps         Episode length (default: 50)
---total_timesteps   Total training steps (default: 100000)
---categories        Synset IDs to train on (default: 02691156 02958343)
---use_wandb         Log to Weights & Biases
---save_dir          Where to save the trained model (default: outputs/ppo)
+--max_steps              Episode length (default: 50)
+--total_timesteps        Total training steps (default: 100000)
+--categories             Synset IDs to train on (default: 02691156 02958343).
+                         Omit to use every synset folder under data/ShapeNetCore.
+--upper_hemisphere_only  Restrict the camera to theta >= 0 (skip looking up
+                         from below the object). Match this between train + eval.
+--split                  Object-instance split: train | val | test | all.
+                         Default: train. Splits are deterministic md5 buckets
+                         on (synset_id, model_id) — 70/15/15.
+--use_wandb              Log to Weights & Biases (requires `pip install wandb tensorboard`)
+--save_dir               Where to save the trained model (default: outputs/ppo)
 ```
 
 Trained models land in `outputs/ppo/ppo_maxsteps{N}.zip`.
+
+## Evaluation
+
+```bash
+python evaluate.py --model_path outputs/ppo/ppo_maxsteps50.zip \
+                   --upper_hemisphere_only      # match training
+                   # --split test               # default; use val during dev
+```
+
+Writes `outputs/eval/<run>.json` and a markdown summary with top-1 accuracy,
+AUCC, and per-category breakdown. Correctness uses the WordNet hypernym
+mapping in `shapenet_gym/labels.py` (`SYNSET_TO_TARGET`).
 
 ## Project layout
 
