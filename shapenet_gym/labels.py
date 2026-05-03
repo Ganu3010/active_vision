@@ -34,6 +34,9 @@ SYNSET_TO_TARGET: dict[str, str] = {
     "03636649": "lamp.n.02",                # source of artificial light
     "04256520": "sofa.n.01",
     "03797390": "mug.n.04",                 # cup / coffee_mug
+    "04090263": "gun.n.01",                 # rifle / assault_rifle / shotgun / revolver
+    "04530566": "vessel.n.02",              # watercraft: ship / boat / canoe / kayak
+    "02942699": "camera.n.01",              # digital_camera / reflex_camera / polaroid
 }
 
 SYNSET_TO_NAME: dict[str, str] = {
@@ -49,6 +52,9 @@ SYNSET_TO_NAME: dict[str, str] = {
     "03636649": "lamp",
     "04256520": "sofa",
     "03797390": "mug",
+    "04090263": "rifle",
+    "04530566": "watercraft",
+    "02942699": "camera",
 }
 
 

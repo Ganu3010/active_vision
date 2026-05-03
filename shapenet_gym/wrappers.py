@@ -225,6 +225,7 @@ def make_training_env(
     seed: Optional[int] = None,
     yolo_model=None,
     upper_hemisphere_only: bool = False,
+    split: str = "all",
 ) -> gym.Env:
     """
     Factory that builds a fully-wrapped ShapeNetViewEnv ready for training.
@@ -267,6 +268,7 @@ def make_training_env(
         offscreen=True,
         yolo_model=yolo_model,
         upper_hemisphere_only=upper_hemisphere_only,
+        split=split,
     )
     env = ViewpointAugmentationWrapper(env)
     if grayscale:

@@ -92,6 +92,7 @@ def make_env(
     categories: list[str] | None = None,
     seed: int | None = None,
     upper_hemisphere_only: bool = False,
+    split: str = "train",
 ):
     """Build one PPO-ready env with multi-input observation (image + YOLO
     probs + pose + summary stats)."""
@@ -111,6 +112,7 @@ def make_env(
         seed=seed,
         yolo_model=yolo,           # enables YoloPoseObservationWrapper
         upper_hemisphere_only=upper_hemisphere_only,
+        split=split,
     )
     env = Monitor(env)
     return env
@@ -159,6 +161,7 @@ def train(args: argparse.Namespace):
             categories=args.categories,
             seed=args.seed,
             upper_hemisphere_only=args.upper_hemisphere_only,
+            split=args.split,
         )
     ])
 
@@ -213,6 +216,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--use_wandb", action="store_true")
     p.add_argument("--upper_hemisphere_only", action="store_true")
+    p.add_argument("--split", choices=["train", "val", "test", "all"], default="train")
     return p.parse_args()
 
 

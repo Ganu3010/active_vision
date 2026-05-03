@@ -88,6 +88,7 @@ class ShapeNetViewEnv(gym.Env):
         offscreen: bool = True,
         yolo_model=None,
         upper_hemisphere_only: bool = False,
+        split: str = "all",
     ):
         super().__init__()
 
@@ -106,6 +107,7 @@ class ShapeNetViewEnv(gym.Env):
         self._yolo = yolo_model
         self._last_yolo_probs: Optional[np.ndarray] = None
         self._upper_hemisphere_only = upper_hemisphere_only
+        self._split = split
 
         self.action_space = spaces.Discrete(5)
         H, W = image_size
@@ -139,7 +141,7 @@ class ShapeNetViewEnv(gym.Env):
         # Lazy-init dataset & renderer
         if self._dataset is None:
             self._dataset = ShapeNetDataset(
-                self.dataset_root, categories=self._categories
+                self.dataset_root, categories=self._categories, split=self._split
             )
         if self._renderer is None:
             self._renderer = MeshRenderer(

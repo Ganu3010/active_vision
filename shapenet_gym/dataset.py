@@ -15,10 +15,11 @@ Expected directory layout (standard ShapeNetCore v2):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 import numpy as np
 
@@ -83,6 +84,28 @@ SYNSET_TO_CATEGORY: Dict[str, str] = {
 }
 
 
+Split = Literal["train", "val", "test", "all"]
+
+
+def _bucket(synset_id: str, model_id: str) -> int:
+    """Stable 0–99 bucket from (synset, model). Survives re-extract."""
+    h = hashlib.md5(f"{synset_id}/{model_id}".encode()).hexdigest()
+    return int(h[:8], 16) % 100
+
+
+def _in_split(synset_id: str, model_id: str, split: Split) -> bool:
+    if split == "all":
+        return True
+    b = _bucket(synset_id, model_id)
+    if split == "train":
+        return b < 70
+    if split == "val":
+        return 70 <= b < 85
+    if split == "test":
+        return b >= 85
+    raise ValueError(f"unknown split: {split}")
+
+
 class ShapeNetDataset:
     """Index and sample objects from a local ShapeNetCore directory.
 
@@ -102,9 +125,11 @@ class ShapeNetDataset:
         root: Path | str,
         categories: Optional[List[str]] = None,
         mesh_filename: str = "model_normalized.obj",
+        split: Split = "all",
     ):
         self.root = Path(root)
         self.mesh_filename = mesh_filename
+        self.split: Split = split
         self._taxonomy = self._load_taxonomy()
 
         # Build the object index
@@ -173,6 +198,9 @@ class ShapeNetDataset:
                         mesh_path = alt
                     else:
                         continue
+
+                if not _in_split(synset_id, model_dir.name, self.split):
+                    continue
 
                 self._objects.append(
                     {
